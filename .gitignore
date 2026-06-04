@@ -16,5 +16,6 @@ wheels/
 .claude
 
 # Other
+figures/
+downloads/
 *.png
-*.jpeg
