@@ -1,5 +1,6 @@
 import os
 import boto3
+import pyproj
 import requests
 import numpy as np
 import rasterio
@@ -8,9 +9,12 @@ import geopandas as gpd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from time import sleep
-from viz import draw_polygon
+from typing import Any, Optional
+from pathlib import Path
+from viz import draw_polygon, draw_raster
 from tokengen import gen_token
 from dotenv import load_dotenv
+from shapely.ops import transform
 from shapely.geometry import box
 from shapely.geometry.base import BaseMultipartGeometry
 
@@ -22,9 +26,21 @@ from shapely.geometry.base import BaseMultipartGeometry
 odata_base_url = "https://catalogue.dataspace.copernicus.eu/odata/v1/Products"
 s3_endpoint_url = "https://eodata.dataspace.copernicus.eu",
 
+BANDS = {
+    'blue': 'B02',
+    'green': 'B03',
+    'red': 'B04',
+    'red_edge_1': 'B05',
+    'red_edge_2': 'B06',
+    'red_edge_3': 'B07',
+    'infrared': 'B08',
+    'narrow_infrared': 'B8A',
+    'swir_1':'B11',
+    'swir_2': 'B12'
+}
 
 
-DB_PROPERTIES = {
+DB = {
     'mata': ['25:157:0:0:8:106', '25:157:0:0:8:216', '25:157:0:0:8:219', '25:168:0:0:19:2', '25:168:0:0:19:3', '25:168:0:0:19:4', '25:168:0:0:19:103'],
     'montolivet': ['25:157:0:0:78', '25:157:0:0:79', '25:157:0:0:7:81', '25:168:0:0:80', '25:168:0:0:20:84'],
     'vinya': ['25:168:0:0:10:6'],
@@ -111,14 +127,16 @@ def traverse_and_download_s3(s3_resource, bucket_name, base_s3_path, local_path,
         download_file_s3(s3_resource.meta.client, bucket_name, s3_key, local_path_file, failed_downloads)
 
 
-def download_product(geometry: BaseMultipartGeometry):
+def download_product(geometry: BaseMultipartGeometry) -> None:
 
     bounds = geometry.bounds
     box_ = box(*bounds)
     wkt_string = box_.wkt
 
     print(wkt_string)
-    exit(0)
+    
+    if len(os.listdir('downloads/eodata/Sentinel-2')) > 0:
+        return
 
     filter = (
         f"Collection/Name eq 'SENTINEL-2' and "
@@ -185,11 +203,85 @@ def download_product(geometry: BaseMultipartGeometry):
         print(f'Connection error: {e}')
 
 
-def clip():
-    ...
+def get_band_path(band: str, res: str = '10m') -> Path | None:
+    prefix = Path('downloads/eodata/Sentinel-2/GRANULE')
 
-def compute_indices():
-    ...
+    band_path = next(prefix.rglob(f'*{band}_{res}.jp2'), None)
+
+    return band_path
+
+
+def clip(geometry: BaseMultipartGeometry, band_path: Path):
+
+    project = pyproj.Transformer.from_crs(
+        'EPSG:4326',
+        'EPSG:32631',
+        always_xy=True,
+    ).transform
+
+    geom_utm = transform(project, geometry)
+    
+    with rasterio.open(band_path) as band_image:
+        band_out, _ = rasterio.mask.mask(
+            band_image,
+            [geom_utm],
+            crop=True,
+            filled=False,
+        )
+
+    return band_out.squeeze().astype('float32')
+
+
+def ndvi(red, infrared):
+    out = (infrared - red) / (red + infrared)
+    return out
+
+
+def gndvi(green, infrared):
+    out = (infrared - green) / (green + infrared)
+    return out
+
+
+def ndwi(green, swir_1):
+    out = (green - swir_1) / (green + swir_1)
+    return out
+
+
+def ndmi(narrow_infrared, swir_1):
+    out = (narrow_infrared - swir_1) / (narrow_infrared + swir_1)
+    return out
+
+
+def require(path: Path | None) -> Path:
+    if path is None:
+        raise ValueError('Missing band path')
+    return path
+
+
+def compute_indices(geometry: BaseMultipartGeometry):
+    green_band = require(get_band_path('B03'))
+    green_band_20m = require(get_band_path('B03', '20m'))
+    red_band = require(get_band_path('B04'))
+    infrared_band = require(get_band_path('B08'))
+    narrow_infrared_band_20m = require(get_band_path('B8A', '20m'))
+    swir_1_band_20m = require(get_band_path('B11', '20m'))
+
+    green = clip(geometry, green_band)
+    green_20m = clip(geometry, green_band_20m)
+    red = clip(geometry, red_band)
+    infrared = clip(geometry, infrared_band)
+    narrow_infrared = clip(geometry, narrow_infrared_band_20m)
+    swir_1 = clip(geometry, swir_1_band_20m)
+
+    ndvi_ = ndvi(red, infrared)
+    gndvi_ = gndvi(green, infrared)
+    ndwi_ = ndwi(green_20m, swir_1)
+    ndmi_ = ndmi(narrow_infrared, swir_1)
+
+    draw_raster(ndvi_, 'ndvi', 'RdYlGn')
+    draw_raster(gndvi_, 'gndvi', 'RdYlGn')
+    draw_raster(ndwi_, 'ndwi', 'Blues')
+    draw_raster(ndmi_, 'ndmi', 'BrBG')
 
 try:
     wfs_url_test = f'{ROUTE_PREFIX}{REFCATS['vinya'][0]}'
@@ -204,10 +296,8 @@ try:
     if isinstance(geometry, BaseMultipartGeometry):
         draw_polygon(geometry, 'vinya')
         download_product(geometry)
-
-    clip()
-    compute_indices()
+        compute_indices(geometry)
 
 except Exception as e:
-    print(f'Error connecting to Catastro API: {e}')
+    print(f'Unexpected error: {e}')
     exit(1)
