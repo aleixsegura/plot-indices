@@ -180,7 +180,7 @@ def download_product(geometry: BaseMultipartGeometry) -> None:
 
             sleep(5)
 
-            print(f'S3 credentials = {s3_credentials}, Type = {type(s3_credentials)}')
+            print('Temporary S3 credentials obtained.')
 
             s3_resource = boto3.resource('s3',
                                          endpoint_url=s3_endpoint_url,
